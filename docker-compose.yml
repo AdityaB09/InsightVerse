@@ -1,0 +1,56 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: insightverse-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: insightverse
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+      - ./infra/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d insightverse"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: insightverse-api
+    environment:
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__Default: Host=db;Port=5432;Database=insightverse;Username=postgres;Password=postgres
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-openai}
+      LLM_PROVIDER: ${LLM_PROVIDER:-openai}
+      CORS_ORIGINS: http://localhost:5173
+      CHUNK_TOKENS: "800"
+      CHUNK_OVERLAP: "120"
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    volumes:
+      - "C:/Users/adity/Downloads/InsightVerse/data/pdfs:/data/pdfs:ro"
+
+  web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: insightverse-web
+    environment:
+      VITE_API_BASE: http://localhost:8080
+    ports:
+      - "5173:5173"
+    depends_on:
+      - api
+
+volumes:
+  dbdata:
