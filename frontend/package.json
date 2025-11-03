@@ -1,20 +1,23 @@
 {
   "name": "insightverse-web",
+  "version": "2.0.1",
   "private": true,
-  "version": "1.0.1",
+  "type": "module",
   "scripts": {
-    "dev": "vite"
+    "dev": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "preview": "vite preview --host 0.0.0.0"
   },
   "dependencies": {
-    "chart.js": "4.4.4",
-    "cytoscape": "3.30.3",
-    "marked": "12.0.2",
-    "react": "18.3.1",
-    "react-chartjs-2": "5.2.0",
-    "react-cytoscapejs": "1.2.1",
-    "react-dom": "18.3.1"
+    "cytoscape": "^3.26.0",
+    "lucide-react": "^0.453.0",
+    "react": "^18.3.1",
+    "react-cytoscapejs": "^1.2.1",
+    "react-dom": "^18.3.1",
+    "react-hot-toast": "^2.4.1"
   },
   "devDependencies": {
-    "vite": "5.4.9"
+    "@vitejs/plugin-react": "^4.3.3",
+    "vite": "^5.4.9"
   }
 }
