@@ -1,14 +1,21 @@
-FROM node:20-alpine
+FROM node:20-alpine AS web
+
 WORKDIR /app
 
-# Copy only package.json (no lockfile required)
-COPY package.json ./
+# copy manifests first for better caching
+COPY package.json package-lock.json* ./
 
-# Install deps (includes dev deps for Vite)
-RUN npm install
+# if a lockfile exists, use ci; otherwise do a normal install
+RUN if [ -f package-lock.json ]; then \
+      npm ci --no-audit --no-fund; \
+    else \
+      npm install --no-audit --no-fund; \
+    fi
 
-# Now copy the rest and run the dev server
+# now copy the source and build
 COPY . .
-ENV HOST=0.0.0.0
+RUN npm run build
+
+# preview/runtime image if you serve static with vite preview
 EXPOSE 5173
-CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
+CMD ["npm", "run", "preview"]

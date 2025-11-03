@@ -1,148 +1,220 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import CytoscapeComponent from "react-cytoscapejs";
-import { RefreshCw } from "lucide-react";
+import cytoscape from "cytoscape";
+import fcose from "cytoscape-fcose";
+import coseBilkent from "cytoscape-cose-bilkent";
+import dagre from "cytoscape-dagre";
+import tinycolor from "tinycolor2";
 
-const API = (p) => (import.meta.env.VITE_API_URL || "http://localhost:8080") + p;
+cytoscape.use(fcose);
+cytoscape.use(coseBilkent);
+cytoscape.use(dagre);
 
-// Utility: build elements + apply simplification to keep graphs readable on messy data
-function buildElements(raw, nodeLimit, minWeight, showAll) {
-  const nodes = raw?.nodes || [];
-  const edges = raw?.edges || [];
+const LAYOUTS = {
+  "Force (fCoSE)": { name: "fcose", quality: "default", nodeRepulsion: 4500, idealEdgeLength: 80, randomize: true, animate: "end" },
+  "Force (CoSE-Bilkent)": { name: "cose-bilkent", animate: "end", gravity: 0.25, nodeRepulsion: 8000, idealEdgeLength: 120, edgeElasticity: 0.2 },
+  "Concentric": { name: "concentric", minNodeSpacing: 40, animate: "end" },
+  "Circle": { name: "circle", avoidOverlap: true, animate: "end" },
+  "DAG (dagre)": { name: "dagre", rankDir: "LR", animate: "end" }
+};
 
-  let filteredEdges = edges.filter((e) => (e.weight ?? 1) >= minWeight);
-  let nodeSet = new Set(filteredEdges.flatMap((e) => [e.source, e.target]));
-
-  // If showAll: include isolated nodes too
-  if (showAll) nodes.forEach((n) => nodeSet.add(n.id));
-
-  // Reduce node count to top-degree nodes if needed
-  if (nodeSet.size > nodeLimit) {
-    const degree = new Map();
-    filteredEdges.forEach((e) => {
-      degree.set(e.source, (degree.get(e.source) || 0) + 1);
-      degree.set(e.target, (degree.get(e.target) || 0) + 1);
-    });
-    const ranked = [...degree.entries()].sort((a, b) => b[1] - a[1]).slice(0, nodeLimit);
-    nodeSet = new Set(ranked.map(([id]) => id));
-    filteredEdges = filteredEdges.filter((e) => nodeSet.has(e.source) && nodeSet.has(e.target));
+function choosePalette(n) {
+  const base = tinycolor("#7dd3fc"); // light blue
+  const colors = [];
+  for (let i = 0; i < n; i++) {
+    colors.push(base.clone().spin((i * (360 / Math.max(1, n))) % 360).saturate(10).toHexString());
   }
-
-  const usedNodes = nodes.filter((n) => nodeSet.has(n.id));
-  const els = [
-    ...usedNodes.map((n) => ({ data: { id: n.id, label: n.label ?? n.id } })),
-    ...filteredEdges.map((e) => ({
-      data: { source: e.source, target: e.target, weight: e.weight ?? 1 }
-    }))
-  ];
-  return els;
+  return colors;
 }
 
-export default function GraphPanel({ documentId }) {
-  const [raw, setRaw] = useState(null);
-  const [nodeLimit, setNodeLimit] = useState(60);
-  const [minWeight, setMinWeight] = useState(2);
-  const [layoutName, setLayoutName] = useState("cose");
-  const [showAll, setShowAll] = useState(false);
+// Very light community detection: connected components over filtered graph.
+function connectedComponents(nodes, edges) {
+  const adj = new Map(nodes.map(n => [n.id, new Set()]));
+  edges.forEach(e => { adj.get(e.source)?.add(e.target); adj.get(e.target)?.add(e.source); });
+  const seen = new Set(); const comps = [];
+  for (const n of nodes) {
+    if (seen.has(n.id)) continue;
+    const q = [n.id]; const comp = [];
+    seen.add(n.id);
+    while (q.length) {
+      const u = q.pop();
+      comp.push(u);
+      for (const v of adj.get(u) ?? []) {
+        if (!seen.has(v)) { seen.add(v); q.push(v); }
+      }
+    }
+    comps.push(comp);
+  }
+  const byId = new Map(); comps.forEach((c, i) => c.forEach(id => byId.set(id, i)));
+  return byId; // nodeId -> component index
+}
 
-  const elements = useMemo(
-    () => buildElements(raw, nodeLimit, minWeight, showAll),
-    [raw, nodeLimit, minWeight, showAll]
+function preprocess(raw, nodeLimit, minEdgeWeight, pruneIsolates) {
+  const nodes = (raw.nodes ?? []).map(n => ({ id: n.id ?? n, label: n.label ?? String(n.label ?? n.id ?? "") }));
+  const edges = (raw.edges ?? []).map(e => ({
+    source: e.source, target: e.target, weight: typeof e.weight === "number" ? e.weight : 1
+  }));
+
+  // Compute degree & weights
+  const degree = new Map(nodes.map(n => [n.id, 0]));
+  edges.forEach(e => {
+    if (e.weight < minEdgeWeight) return;
+    degree.set(e.source, (degree.get(e.source) ?? 0) + 1);
+    degree.set(e.target, (degree.get(e.target) ?? 0) + 1);
+  });
+
+  // Rank nodes by degree, cap
+  const ranked = [...nodes].sort((a,b) => (degree.get(b.id)??0) - (degree.get(a.id)??0)).slice(0, nodeLimit);
+  const keep = new Set(ranked.map(n => n.id));
+
+  // Filter edges to kept nodes and min weight
+  let keptEdges = edges.filter(e => keep.has(e.source) && keep.has(e.target) && e.weight >= minEdgeWeight);
+
+  // Optionally drop isolates
+  if (pruneIsolates) {
+    const deg2 = new Map(ranked.map(n => [n.id, 0]));
+    keptEdges.forEach(e => {
+      deg2.set(e.source, (deg2.get(e.source) ?? 0) + 1);
+      deg2.set(e.target, (deg2.get(e.target) ?? 0) + 1);
+    });
+    const rankedNonIso = ranked.filter(n => (deg2.get(n.id) ?? 0) > 0);
+    return { nodes: rankedNonIso, edges: keptEdges };
+  }
+  return { nodes: ranked, edges: keptEdges };
+}
+
+export default function GraphPanel({ rawGraph, docTitle, loading }) {
+  const [layoutKey, setLayoutKey] = useState("Force (fCoSE)");
+  const [nodeLimit, setNodeLimit] = useState(150);
+  const [minEdge, setMinEdge] = useState(2);
+  const [pruneIso, setPruneIso] = useState(false);
+  const cyRef = useRef(null);
+  const divRef = useRef(null);
+
+  const processed = useMemo(
+    () => preprocess(rawGraph, nodeLimit, minEdge, pruneIso),
+    [rawGraph, nodeLimit, minEdge, pruneIso]
   );
 
   useEffect(() => {
-    if (!documentId) { setRaw(null); return; }
-    (async () => {
-      const r = await fetch(API(`/api/graph/${documentId}`));
-      const j = await r.json();
-      setRaw(j);
-    })();
-  }, [documentId]);
+    if (!divRef.current) return;
 
-  const layout = useMemo(() => {
-    if (layoutName === "concentric") {
-      return { name: "concentric", levelWidth: () => 1, minNodeSpacing: 15, animate: true };
+    if (cyRef.current) {
+      cyRef.current.destroy();
+      cyRef.current = null;
     }
-    if (layoutName === "grid") {
-      return { name: "grid", fit: true, avoidOverlap: true };
-    }
-    // default: cose force-directed
-    return { name: "cose", animate: true, padding: 20, nodeRepulsion: 10000, idealEdgeLength: 100 };
-  }, [layoutName]);
+
+    const { nodes, edges } = processed;
+    const comps = connectedComponents(nodes, edges);
+    const palette = choosePalette(Math.max(1, Math.max(...Array.from(comps.values())) + 1));
+
+    cyRef.current = cytoscape({
+      container: divRef.current,
+      elements: [
+        ...nodes.map(n => ({
+          data: { id: n.id, label: n.label },
+          classes: `c${comps.get(n.id) ?? 0}`
+        })),
+        ...edges.map(e => ({ data: { source: e.source, target: e.target, weight: e.weight } }))
+      ],
+      style: [
+        {
+          selector: "node",
+          style: {
+            "background-color": "#60a5fa",
+            "label": "data(label)",
+            "color": "#dbeafe",
+            "font-size": "10px",
+            "text-wrap": "wrap",
+            "text-max-width": "120px",
+            "text-outline-width": 2,
+            "text-outline-color": "#0b1220",
+            "border-width": 1,
+            "border-color": "#1f2937"
+          }
+        },
+        {
+          selector: "edge",
+          style: {
+            "width": "mapData(weight, 1, 10, 1, 4)",
+            "curve-style": "haystack",
+            "line-color": "#334155",
+            "opacity": 0.7
+          }
+        },
+        ...palette.map((c, i) => ({
+          selector: `.c${i}`,
+          style: { "background-color": c }
+        })),
+        { selector: ":selected", style: { "border-width": 3, "border-color": "#fde047" } }
+      ],
+      wheelSensitivity: 0.2,
+      minZoom: 0.2,
+      maxZoom: 3
+    });
+
+    const runLayout = () => {
+      const opts = LAYOUTS[layoutKey] ?? LAYOUTS["Force (fCoSE)"];
+      const l = cyRef.current.layout(opts);
+      l.run();
+    };
+    runLayout();
+
+    // Fit after animation ends
+    cyRef.current.on("layoutstop", () => cyRef.current.fit(undefined, 30));
+
+    // Tooltip-ish title
+    cyRef.current.nodes().forEach(n => n.qtip?.destroy?.());
+
+    return () => cyRef.current?.destroy();
+  }, [processed, layoutKey]);
+
+  const stabilize = () => {
+    if (!cyRef.current) return;
+    const opts = LAYOUTS[layoutKey] ?? LAYOUTS["Force (fCoSE)"];
+    cyRef.current.layout({ ...opts, randomize: true }).run();
+  };
+
+  const exportPng = () => {
+    if (!cyRef.current) return;
+    const png = cyRef.current.png({ full: true, scale: 2, bg: "#0b1220" });
+    const a = document.createElement("a");
+    a.href = png;
+    a.download = `${(docTitle || "graph").replace(/\s+/g, "_")}.png`;
+    a.click();
+  };
 
   return (
-    <>
-      <div className="toolbar" style={{ marginBottom: 8 }}>
-        <label className="small">Layout</label>
-        <select className="select" value={layoutName} onChange={(e) => setLayoutName(e.target.value)}>
-          <option value="cose">Force (CoSE)</option>
-          <option value="concentric">Concentric</option>
-          <option value="grid">Grid</option>
-        </select>
-
-        <label className="small">Node limit: {nodeLimit}</label>
-        <input type="range" min="20" max="200" value={nodeLimit} className="slider" onChange={(e) => setNodeLimit(+e.target.value)} />
-
-        <label className="small">Min edge weight: {minWeight}</label>
-        <input type="range" min="1" max="10" value={minWeight} className="slider" onChange={(e) => setMinWeight(+e.target.value)} />
-
-        <label className="small" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-          <input type="checkbox" checked={showAll} onChange={(e) => setShowAll(e.target.checked)} />
-          Show isolated nodes
-        </label>
-
-        <button className="btn" onClick={() => setLayoutName((x) => x)}>
-          <RefreshCw size={16} /> Stabilize
-        </button>
+    <div className="card graph">
+      <div className="card-header">
+        <div className="title">Semantic Graph <span className="subtitle">{docTitle || ""}</span></div>
+        <div className="toolbar">
+          <label>Layout&nbsp;
+            <select value={layoutKey} onChange={e => setLayoutKey(e.target.value)}>
+              {Object.keys(LAYOUTS).map(k => <option key={k} value={k}>{k}</option>)}
+            </select>
+          </label>
+          <label>Node limit&nbsp;
+            <input type="range" min={30} max={300} value={nodeLimit} onChange={e=>setNodeLimit(+e.target.value)} />
+            <span className="hint">{nodeLimit}</span>
+          </label>
+          <label>Min edge weight&nbsp;
+            <input type="range" min={1} max={10} value={minEdge} onChange={e=>setMinEdge(+e.target.value)} />
+            <span className="hint">{minEdge}</span>
+          </label>
+          <label className="checkbox">
+            <input type="checkbox" checked={pruneIso} onChange={e=>setPruneIso(e.target.checked)} />
+            Prune isolated
+          </label>
+          <button className="btn" onClick={stabilize}>Stabilize</button>
+          <button className="btn ghost" onClick={exportPng}>Export PNG</button>
+        </div>
       </div>
 
-      <div style={{ height: 320 }}>
-        <CytoscapeComponent
-          elements={elements}
-          style={{ width: "100%", height: "100%" }}
-          layout={layout}
-          stylesheet={[
-            { selector: "node", style: {
-                "background-color": "#7aa2ff",
-                "label": "data(label)",
-                "color": "#e8eefb",
-                "font-size": 10,
-                "text-wrap": "wrap",
-                "text-max-width": 100,
-                "width": "mapData(degree, 0, 10, 14, 28)",
-                "height": "mapData(degree, 0, 10, 14, 28)",
-                "border-color": "#cfe2ff",
-                "border-width": 1
-              }
-            },
-            { selector: "edge", style: {
-                "width": "mapData(weight, 1, 10, 1, 5)",
-                "line-color": "#6b7b96",
-                "curve-style": "bezier",
-                "target-arrow-shape": "triangle",
-                "target-arrow-color": "#6b7b96"
-              }
-            },
-            { selector: ":selected", style: { "background-color": "#27e1a1", "line-color": "#27e1a1", "target-arrow-color": "#27e1a1" } }
-          ]}
-          cy={(cy) => {
-            // calculate degree to size nodes
-            cy.nodes().forEach(n => n.data("degree", n.degree(false)));
-            // highlight on hover
-            cy.on("mouseover", "node", (e) => {
-              const n = e.target;
-              n.connectedEdges().addClass("hover");
-              n.connectedEdges().style("line-color", "#a5b4fc");
-            });
-            cy.on("mouseout", "node", (e) => {
-              const n = e.target;
-              n.connectedEdges().removeClass("hover");
-              n.connectedEdges().style("line-color", "#6b7b96");
-            });
-          }}
-        />
+      <div className="graph-body">
+        {loading ? <div className="loading">Building graph…</div> : null}
+        <div ref={divRef} className="cy"></div>
+        {!processed.nodes.length && !loading ? <div className="empty">No graph data (try lowering “Min edge weight” or increasing “Node limit”).</div> : null}
       </div>
-
-      {!documentId && <div className="small" style={{ marginTop: 8 }}>Select a document to render the graph.</div>}
-    </>
+    </div>
   );
 }

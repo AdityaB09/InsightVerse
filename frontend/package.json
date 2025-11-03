@@ -1,23 +1,26 @@
 {
   "name": "insightverse-web",
-  "version": "2.0.1",
+  "version": "2.1.1",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
-    "preview": "vite preview --host 0.0.0.0"
+    "preview": "vite preview --host"
   },
   "dependencies": {
-    "cytoscape": "^3.26.0",
-    "lucide-react": "^0.453.0",
-    "react": "^18.3.1",
-    "react-cytoscapejs": "^1.2.1",
-    "react-dom": "^18.3.1",
-    "react-hot-toast": "^2.4.1"
+    "classnames": "2.5.1",
+    "cytoscape": "3.29.2",
+    "cytoscape-cose-bilkent": "4.1.0",
+    "cytoscape-dagre": "2.5.0",
+    "cytoscape-fcose": "2.2.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "react-hot-toast": "2.4.1",
+    "tinycolor2": "1.6.0"
   },
   "devDependencies": {
-    "@vitejs/plugin-react": "^4.3.3",
-    "vite": "^5.4.9"
+    "@vitejs/plugin-react": "4.3.3",
+    "vite": "5.4.11"
   }
 }
